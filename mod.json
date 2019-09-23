@@ -1,0 +1,14 @@
+{
+	"Name": "CompressedJSONCache",
+	"Author": "CptMoore",
+	"Website": "https://github.com/CptMoore/CompressedJSONCache",
+    "Description": "Caches JSON loads.",
+    "Category": "tools",
+	
+	"Version": "1.0",
+
+	"Enabled": true,
+	"DependsOn": ["MonoUnityFacades"],
+	"DLL": "CompressedJSONCache.dll",
+	"DLLEntryPoint": "CompressedJSONCache.Main.Start"
+}
