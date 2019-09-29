@@ -130,9 +130,10 @@ namespace CompressedJSONCache
 
     internal static class Cache
     {
-        private static Dictionary<string, byte[]> cache = new Dictionary<string, byte[]>();
         internal static void Build(IEnumerable<VersionManifestEntry> entries)
         {
+            Load();
+
             foreach (var entry in entries)
             {
                 if (!entry.IsFileAsset)
@@ -146,6 +147,10 @@ namespace CompressedJSONCache
                     try
                     {
                         var key = NormFilePath(filePath);
+                        if (cache.ContainsKey(key))
+                        {
+                            continue;
+                        }
                         Main.Logger.Log($"caching {key}");
                         var text = File.ReadAllText(filePath);
                         Set(key, text);
@@ -156,17 +161,40 @@ namespace CompressedJSONCache
                     }
                 }
             }
-            Main.Logger.Log("saving cache");
             Save();
             Benchmark.PrintBenchmarks();
         }
-
+        
+        private static Dictionary<string, byte[]> cache = new Dictionary<string, byte[]>();
         private static readonly BinaryFormatter formatter = new BinaryFormatter();
         internal static void Save()
         {
-            using (var fileStream = new FileStream(Main.CacheFilePath, FileMode.Create))
+            Main.Logger.Log("saving cache");
+            try
             {
-                formatter.Serialize(fileStream, cache);
+                using (var fileStream = new FileStream(Main.CacheFilePath, FileMode.Create))
+                {
+                    formatter.Serialize(fileStream, cache);
+                }
+            }
+            catch (Exception e)
+            {
+                Main.Logger.LogError(e);
+            }
+        }
+        internal static void Load()
+        {
+            Main.Logger.Log("loading cache");
+            try
+            {
+                using (var fileStream = new FileStream(Main.CacheFilePath, FileMode.Open))
+                {
+                    cache = (Dictionary<string, byte[]>)formatter.Deserialize(fileStream);
+                }
+            }
+            catch (Exception e)
+            {
+                Main.Logger.LogError(e);
             }
         }
 
@@ -297,7 +325,7 @@ namespace CompressedJSONCache
         {
             var timeMS = stopwatch.ElapsedMilliseconds;
             var avgMS = count == 0 ? "-" : (timeMS / count).ToString();
-            Main.Logger.LogError($"BENCHMARK id={id} time={timeMS}ms count={count} avg={avgMS}");
+            Main.Logger.Log($"BENCHMARK id={id} time={timeMS}ms count={count} avg={avgMS}");
         }
 
         public static void PrintBenchmarks()
