@@ -1,9 +1,8 @@
 ﻿using BattleTech;
+using BattleTech.Data;
 using BattleTech.UI;
 using Harmony;
 using HBS.Data;
-using HBS.Logging;
-using HBS.Util;
 using K4os.Compression.LZ4;
 using System;
 using System.Collections.Generic;
@@ -30,6 +29,22 @@ namespace CompressedJSONCache
         }
     }
 
+    //[HarmonyPatch(typeof(LoadRequest), nameof(LoadRequest.ProcessRequests))]
+    public static class LoadRequest_ProcessRequests_Patch
+    {
+        public static void Postfix()
+        {
+            try
+            {
+                Benchmark.PrintBenchmarks();
+            }
+            catch (Exception e)
+            {
+                Main.Logger.LogError("error loading", e);
+            }
+        }
+    }
+
     [HarmonyPatch(typeof(File), nameof(File.ReadAllText), typeof(string))]
     public static class File_ReadAllText_Patch
     {
@@ -37,7 +52,7 @@ namespace CompressedJSONCache
         {
             try
             {
-                var key = Cache.NormFilePath(path);
+                var key = Cache.KeyedFilePath(path);
                 if (Cache.Get(key, out __result))
                 {
                     return false;
@@ -58,7 +73,7 @@ namespace CompressedJSONCache
         {
             try
             {
-                var key = Cache.NormFilePath(path);
+                var key = Cache.KeyedFilePath(path);
                 if (Cache.Get(key, out var text))
                 {
                     handler(text);
@@ -77,6 +92,8 @@ namespace CompressedJSONCache
     [HarmonyPatch(typeof(BattleTechResourceLocator), "RefreshTypedEntries")]
     public static class BattleTechResourceLocator_RefreshTypedEntries_Patch
     {
+        internal static readonly Benchmark benchmarkf = Benchmark.Create("Build");
+
         [HarmonyPriority(Priority.Last)]
         public static void Postfix(
             Dictionary<BattleTechResourceType, Dictionary<string, VersionManifestEntry>> ___baseManifest,
@@ -85,8 +102,14 @@ namespace CompressedJSONCache
         {
             try
             {
-                var entries = EnumerateEntries(___baseManifest, ___contentPacksManifest, ___addendumsManifest);
-                Cache.Build(entries);
+                benchmarkf.Prefix();
+                if (!Cache.Load())
+                {
+                    var entries = EnumerateEntries(___baseManifest, ___contentPacksManifest, ___addendumsManifest);
+                    Cache.Build(entries);
+                }
+                benchmarkf.Postfix();
+                Benchmark.PrintBenchmarks();
             }
             catch (Exception e)
             {
@@ -132,8 +155,6 @@ namespace CompressedJSONCache
     {
         internal static void Build(IEnumerable<VersionManifestEntry> entries)
         {
-            Load();
-
             foreach (var entry in entries)
             {
                 if (!entry.IsFileAsset)
@@ -141,12 +162,16 @@ namespace CompressedJSONCache
                     continue;
                 }
                 var filePath = entry.FilePath;
-                var ext = Path.GetExtension(filePath);
+                var ext = Extension(filePath);
+                if (ext == null)
+                {
+                    continue;
+                }
                 if (ext == ".csv" || ext == ".json" || ext == ".txt")
                 {
                     try
                     {
-                        var key = NormFilePath(filePath);
+                        var key = KeyedFilePath(filePath);
                         if (cache.ContainsKey(key))
                         {
                             continue;
@@ -161,8 +186,8 @@ namespace CompressedJSONCache
                     }
                 }
             }
+
             Save();
-            Benchmark.PrintBenchmarks();
         }
         
         private static Dictionary<string, byte[]> cache = new Dictionary<string, byte[]>();
@@ -182,23 +207,33 @@ namespace CompressedJSONCache
                 Main.Logger.LogError(e);
             }
         }
-        internal static void Load()
+        internal static bool Load()
         {
+            if (cache.Count > 0)
+            {
+                return true;
+            }
+
             Main.Logger.Log("loading cache");
             try
             {
-                using (var fileStream = new FileStream(Main.CacheFilePath, FileMode.Open))
+                if (File.Exists(Main.CacheFilePath))
                 {
-                    cache = (Dictionary<string, byte[]>)formatter.Deserialize(fileStream);
+                    using (var fileStream = new FileStream(Main.CacheFilePath, FileMode.Open))
+                    {
+                        cache = (Dictionary<string, byte[]>)formatter.Deserialize(fileStream);
+                    }
+                    return true;
                 }
             }
             catch (Exception e)
             {
                 Main.Logger.LogError(e);
             }
+            return false;
         }
 
-        internal static readonly Benchmark benchmarkd = new Benchmark("Decompress");
+        internal static readonly Benchmark benchmarkd = Benchmark.Create("Decompress");
         internal static bool Get(string key, out string text)
         {
             try
@@ -220,7 +255,7 @@ namespace CompressedJSONCache
             return false;
         }
         
-        internal static readonly Benchmark benchmarkc = new Benchmark("Compress");
+        internal static readonly Benchmark benchmarkc = Benchmark.Create("Compress");
         internal static void Set(string key, string text)
         {
             try
@@ -238,33 +273,33 @@ namespace CompressedJSONCache
         private static readonly string GameDirectoryPath;
         static Cache()
         {
-            GameDirectoryPath = Path.GetFullPath(Path.Combine(Path.Combine(Application.streamingAssetsPath, ".."), ".."));
+            GameDirectoryPath = NormFilePath(Path.GetFullPath(Path.Combine(Path.Combine(Application.streamingAssetsPath, ".."), "..")));
         }
+
+        internal static readonly Benchmark benchmarkn = Benchmark.Create("KeyedFilePath");
+        internal static string KeyedFilePath(string path)
+        {
+            benchmarkn.Prefix();
+            var relativePath = path.Substring(GameDirectoryPath.Length + 1);
+            var normedRelativePath = NormFilePath(relativePath);
+            benchmarkn.Postfix();
+            return normedRelativePath;
+        }
+        
         internal static string NormFilePath(string path)
         {
-            return GetRelativePath(path, GameDirectoryPath);
+            return path.Replace(@"\", "/");
         }
-        internal static string GetRelativePath(string path, string rootPath)
+
+        internal static string Extension(string path)
         {
-            if (!Path.IsPathRooted(path))
-                return path;
-
-            rootPath = Path.GetFullPath(rootPath);
-            if (rootPath[rootPath.Length-1] != Path.DirectorySeparatorChar)
-                rootPath += Path.DirectorySeparatorChar;
-
-            var pathUri = new Uri(Path.GetFullPath(path), UriKind.Absolute);
-            var rootUri = new Uri(rootPath, UriKind.Absolute);
-
-            if (pathUri.Scheme != rootUri.Scheme)
-                return path;
-
-            var relativeUri = rootUri.MakeRelativeUri(pathUri);
-            var relativePath = Uri.UnescapeDataString(relativeUri.ToString());
-
-            relativePath = relativePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
-
-            return relativePath;
+            var lastIndexOf = path.LastIndexOf(".");
+            if (lastIndexOf < 0)
+            {
+                return null;
+            }
+            var ext = path.Substring(lastIndexOf);
+            return ext;
         }
 
         private static byte[] Compress(string text)
@@ -306,7 +341,7 @@ namespace CompressedJSONCache
         int count = 0;
 
         private string id;
-        internal Benchmark(string id)
+        private Benchmark(string id)
         {
             this.id = id;
         }
@@ -328,10 +363,19 @@ namespace CompressedJSONCache
             Main.Logger.Log($"BENCHMARK id={id} time={timeMS}ms count={count} avg={avgMS}");
         }
 
+        private static List<Benchmark> benchmarks = new List<Benchmark>();
+        public static Benchmark Create(string id) {
+            var benchmark =  new Benchmark(id);
+            benchmarks.Add(benchmark);
+            return benchmark;
+        }
         public static void PrintBenchmarks()
         {
-            Cache.benchmarkc.Print();
-            Cache.benchmarkd.Print();
+            Main.Logger.Log($"### BENCHMARKS");
+            foreach (var benchmark in benchmarks)
+            {
+                benchmark.Print();
+            }
         }
     }
 }
